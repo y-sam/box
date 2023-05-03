@@ -1,0 +1,483 @@
+---
+title: "Case: Estudo de rentabilidade - Desafio Data"
+author: "Yuri Sampaio"
+date: "`r Sys.Date()`"
+output:
+  prettydoc::html_pretty:
+    theme: cayman
+    highlight: github
+vignette: >
+  %\VignetteIndexEntry{Vignette Title}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+
+---
+
+```{r packages, fig.align='center', message=FALSE, warning=FALSE, include=FALSE}
+library(tidyverse)
+library(readxl)
+library(plotly)
+library(factoextra)
+library(FactoMineR)
+library(cluster)
+library(clValid)
+library(fpc)
+library(NbClust)
+library(data.table)
+library(DT)
+```
+
+
+```{r importdata, fig.align='center', message=FALSE, warning=FALSE, collapse=TRUE, include=FALSE}
+options(scipen=999)
+data <- read_excel('CASE_RentabilidadeAnalitica.xlsx', skip = 2,
+                   col_names = c(
+                                'stonecode',	'MCC',	'Data_Apuracao',
+                                'Data_de_Entrada_do_Cliente', 'Canal', 'Cidade',	
+                                'Volume_Transacionado', 'Quantidade_de_Transacoes', 'Net_MDR',
+                                'Aluguel', 'Pre_pagamento_receita', 'Total_receita',
+                                'Pre_pagamento_custos', 'Equipamento_Logistica', 'Comissoes',
+                                'Transacionais', 'Outros',	'Total_custos','Margem_final'
+                                ),
+                   col_types = c(
+                                'text', 'numeric', 'date', 
+                                'date', 'text', 'text', 'numeric', 
+                                'numeric', 'numeric', 'numeric', 
+                                'numeric', 'numeric', 'numeric', 
+                                'numeric', 'numeric', 'numeric', 
+                                'numeric', 'numeric', 'numeric'
+                                )
+                   )
+
+
+
+```
+
+  
+
+### estatísticas dos dados
+```{r stats, eval=FALSE, fig.align='center', message=FALSE, warning=FALSE, collapse=TRUE, include=FALSE}
+summary(data)
+```
+
+
+### Agregando os dados
+Por termos os dados de uma série temporal (5 meses) preciso agregar os dados de alguma forma a fim de condensar as informações  
+de cada cliente numa única entrada. Para simplificar aqui estou utilizado os totais do período.   
+Aproveito e já deixo apenas as colunas númericas, passando o stonecode para row name (lá frente vamos precisar para associar cluster e Cliente). Descartei, também as agregações das colunas de custo total e receita total, uma vez que já temos essas informações decompostas em outras colunas.
+
+```{r total, fig.align='center', message=FALSE, warning=FALSE, collapse=TRUE, include=FALSE}
+
+data_totals <-
+  data %>% 
+  select(-'MCC',	-'Data_Apuracao',
+         -'Data_de_Entrada_do_Cliente', -'Canal', -'Cidade') %>% 
+  group_by(stonecode) %>% 
+  summarise(
+    sum_Volume_Transacionado = sum(Volume_Transacionado), 
+    sum_Quantidade_de_Transacoes = sum(Quantidade_de_Transacoes), 
+    sum_Net_MDR = sum(Net_MDR),
+    sum_Aluguel = sum(Aluguel), 
+    sum_Pre_pagamento_receita = sum(Pre_pagamento_receita), 
+    sum_Total_receita = sum(Total_receita),
+    sum_Pre_pagamento_custos = sum(Pre_pagamento_custos), 
+    sum_Equipamento_Logistica = sum(Equipamento_Logistica), 
+    sum_Comissoes = sum(Comissoes),
+    sum_Transacionais = sum(Transacionais), 
+    sum_Outros = sum(Outros),	
+    sum_Total_custos = sum(Total_custos),
+    sum_Margem_final = sum(Margem_final)
+
+  ) 
+row.names(data_totals) <- data_totals$stonecode
+data_totals_final <- data_totals %>% 
+  select(- stonecode)
+```
+
+### Estatísticas dos dados agregados
+```{r total_stats, echo=FALSE, fig.align='center', message=FALSE, warning=FALSE, collapse=TRUE}
+
+summary(data_totals_final)
+```
+
+### Como temos valores de ordens de grandeza diferentes os dados precisam ser normalizados.
+
+```{r scaled, echo=FALSE, fig.align='center', message=FALSE, warning=FALSE, collapse=TRUE}
+
+totals_scaled <- scale(data_totals_final)
+summary(totals_scaled)
+```
+
+
+### Verificando o melhor algoritimo de clusterização
+
+```{r compare, eval=FALSE, fig.align='center', message=FALSE, warning=FALSE, collapse=TRUE, include=FALSE}
+clmethods <- c('hirerchical', 'kmeans', 'clara')
+
+intern <- clValid(totals_scaled, nClust = 2:8, clMethods = clmethods, maxitems = 4000, validation = 'internal')
+summary(intern)
+
+stab <- clValid(totals_scaled, nClust = 2:8, clMethods = clmethods, maxitems = 4000, validation = 'stability')
+optimalScores(stab)
+```
+
+### Quantidade de clusters
+Temos que kmeans, em geral, vai ser o melhor algoritimo para clusterização desta base, no entanto a quantidade de cluster adequada   
+não foi apontada de forma conclusiva (2, 6 ou 8). Para tentar escolher a quantidade ótima vamos ver a quantidade de cluster que nos dá uma boa compactação.
+
+```{r nclust, echo=FALSE, fig.align='center', fig.height=8, fig.width=10, message=FALSE, warning=FALSE, collapse=TRUE, paged.print=FALSE}
+set.seed(1234)
+
+fviz_nbclust(totals_scaled, kmeans, method = 'wss')
+
+```
+
+A maior queda na somma dos quadrados intra-cluster (o "cotovelo") está em dois clusters, mas com essa quantidade pequena é provável que percamos algumas nuances das caracteríscas dos clientes. Vemos pelo gráfico, que há um segundo cotovelo em 5 clusters, que srá a quantidade de cluster adotada.
+
+
+
+```{r km_clust, echo=FALSE, fig.align='center', fig.height=6, fig.width=10, message=FALSE, warning=FALSE, collapse=TRUE}
+
+km <- kmeans(totals_scaled, 5, nstart = 1000)
+grp_km <- as.factor(km$cluster)
+
+plot.km <- fviz_cluster(km, totals_scaled, ellipse.type = 'euclid',
+             ellipse.level = .9, ellipse.alpha = .1, pointsize = 1,
+             labelsize = .5, ggtheme = theme_minimal(),
+             outlier.color = 'black', palette = 'Paired')+
+  coord_cartesian(xlim = c(-2,50), ylim = c(-25, 20))
+
+ggplotly(plot.km)
+```
+
+```{r join, echo=FALSE, fig.align='center', message=FALSE, warning=FALSE, collapse=TRUE}
+mcc <- read_excel("MCC.xlsx") %>% 
+  select(MCC, DescricaoGrupo)
+
+clust <- data.frame(list(km$cluster))
+
+clust <- setDT(clust, keep.rownames = TRUE)[] %>% 
+  rename(stonecode = rn,
+         cluster = c..100100026313922....4L...100100082815567....4L...100100087809648....4L..
+  )			
+                   
+
+data_clusters <- 
+  inner_join(clust, data, by = 'stonecode') %>% 
+  inner_join(mcc, by = 'MCC') %>% 
+  select(-'MCC') %>% 
+  mutate(ticket_medio = case_when(
+         Quantidade_de_Transacoes == 0 ~ 0,
+         Quantidade_de_Transacoes > 0 ~ Volume_Transacionado/Quantidade_de_Transacoes
+                                  ),
+          ativado = case_when(
+          Quantidade_de_Transacoes == 0 ~ 'Inativo',
+          Quantidade_de_Transacoes > 0 ~ 'Ativo'
+                                  ),
+        cluster = as.factor(cluster)
+         )
+
+```         
+
+### Quantidade de Clientes por cluster
+Temos uma grande consetração dos Clientes no cluster 1 e uma quantidade anedótica nos clusters 3 e 4, motivo pelo qual estes dois clusters serão omitidos de alguns gráficos, a fim de obtermos melhores visualizações.
+
+```{r clustqty, echo=FALSE, fig.align='center', fig.height=6, fig.width=10, message=FALSE, warning=FALSE, collapse=T}
+qtd_cluster <-
+  data_clusters %>%
+    select(stonecode, cluster) %>% 
+    distinct() %>%     
+    group_by(cluster) %>%
+    summarise(total = n())%>% 
+  ggplot() +
+    aes(x = cluster, fill = cluster, y = total) +
+    geom_col() +
+    scale_fill_brewer(palette = "Paired") +
+    labs(x = "Cluster", y = "Total de Clientes", title = "Quantidade de Clientes por cluster") +
+    theme_minimal() 
+    ggplotly(qtd_cluster)
+```
+
+### Resultado por cluster
+
+```{r resultado, echo=FALSE, fig.align='center', fig.height=6, fig.width=10, message=FALSE, warning=FALSE, collapse=T}
+  fin_cluster <-
+  data_clusters %>%
+       select(cluster, Total_receita, Total_custos, Margem_final, Data_Apuracao
+           ) %>% 
+    group_by(cluster, Data_Apuracao) %>% 
+    summarise(
+           Receita = sum(Total_receita),
+           Custos = sum(Total_custos),
+           Resultado = sum(Margem_final),
+           ) %>% 
+      mutate(
+           receita_total = Receita/sum(data_clusters$Total_receita),
+           custos_total = Custos/sum(data_clusters$Total_custos),
+           margem_total = Resultado/sum(data_clusters$Margem_final)
+          ) %>% 
+    gather(metrica, valor, 3:8) %>% 
+    filter(!(cluster %in% c('4', '3'))) %>%  
+    filter(metrica %in% c("Receita", "Custos", "Resultado")) %>%
+    ggplot() +
+    aes(x = Data_Apuracao, y = valor, colour = cluster) +
+    geom_line(size = 1L) +
+    scale_color_brewer(palette = "Paired") +
+    labs(x = "Mês de refêrencia", y = "Valor (R$)", title = "Resultado financeiro por cluster") +
+    theme_minimal() +
+    facet_wrap(vars(metrica))
+  ggplotly(fin_cluster)
+```
+  
+Em termos percentuais vemos que os Clientes do cluster 1 foram responsáveis por 51% da lucro do período, embora teham trazido apenas 42% da receita.
+
+```{r resultadopct, echo=FALSE, fig.align='center', fig.height=6, fig.width=10, message=FALSE, warning=FALSE, collapse=T}
+pct_cluster <- 
+    data_clusters %>%
+    select(cluster, Total_receita, Total_custos, Margem_final
+    ) %>% 
+    group_by(cluster) %>% 
+    summarise(
+      Receita = sum(Total_receita),
+      Custos = sum(Total_custos),
+      Resultado = sum(Margem_final),
+    ) %>% 
+    mutate(
+      Receita_pct = 100*Receita/sum(data_clusters$Total_receita),
+      Custos_pct = 100*Custos/sum(data_clusters$Total_custos),
+      Resultado_pct = 100*Resultado/sum(data_clusters$Margem_final)
+    ) %>% 
+    gather(metrica, valor, 2:7) %>%
+    filter(!(cluster %in% c('4', '3'))) %>%
+    filter(metrica %in% c("Receita_pct", "Custos_pct", "Resultado_pct")) %>%
+    ggplot() +
+    aes(x = cluster, fill = cluster, weight = valor) +
+    geom_bar() +
+    scale_fill_brewer(palette = "Paired") +
+    labs(x = "Cluster", y = "(%)", title = "Participação (%) no resultado por cluster") +
+    theme_minimal() +
+    facet_wrap(vars(metrica))
+  ggplotly(pct_cluster)
+```
+
+
+### Churn  e Tempo de vida médio
+
+No período observado o cluster 1 apresentou as maiores taxas de churn - acima de 6% em todos os meses - equanto o cluster 2 foi mais estável e o cluster 5 apresentou uma queda líquida. Clusters 3 e 4 não apresentaram churn no período
+
+Em relação ao tempo de vida médio o cluster 2 se destaca tendo uma média de 74 meses, mais de 5 vezes o valor do cluster 1 (14,2) o mais que o dobro do cluster 5 (33,8).
+
+```{r churn, echo=FALSE, fig.align='center', fig.height=6, fig.width=10, message=FALSE, warning=FALSE, collapse=T}
+clusters_churn <-
+  
+data_clusters %>%
+  select(stonecode, cluster, Data_Apuracao, ativado) %>% 
+  spread(Data_Apuracao, ativado) %>% 
+  mutate(baseativaNov = case_when(`2016-10-01` == 'Ativo' ~ 1, T~0),
+         baseativaDez = case_when(`2016-11-01` == 'Ativo' ~ 1, T~0),
+         baseativaJan = case_when(`2016-12-01` == 'Ativo' ~ 1, T~0),
+         baseativaFev = case_when(`2017-01-01` == 'Ativo' ~ 1, T~0),
+         
+         basechurnNov = paste(`2016-10-01`,`2016-11-01`, sep = ''),
+         basechurnDez = paste(`2016-11-01`,`2016-12-01`, sep = ''),
+         basechurnJan = paste(`2016-12-01`,`2017-01-01`, sep = ''),
+         basechurnFev = paste(`2017-01-01`,`2017-02-01`, sep = '')
+         ) %>% 
+  
+  mutate(basechurnNov = case_when(basechurnNov == 'AtivoInativo' ~ 1, T ~ 0),
+         basechurnDez = case_when(basechurnDez == 'AtivoInativo' ~ 1, T ~ 0),
+         basechurnJan = case_when(basechurnJan == 'AtivoInativo' ~ 1, T ~ 0),
+         basechurnFev = case_when(basechurnFev == 'AtivoInativo' ~ 1, T ~ 0)
+           ) %>% 
+  select(-`2016-10-01`, -`2016-11-01`, -`2016-12-01`, -`2017-01-01`, -`2017-02-01`, -stonecode) %>% 
+  group_by(cluster) %>% 
+  summarise(
+            baseativaNov = sum(baseativaNov),
+            baseativaDez = sum(baseativaDez),
+            baseativaJan = sum(baseativaJan),
+            baseativaFev = sum(baseativaFev),
+            basechurnNov = sum(basechurnNov),
+            basechurnDez = sum(basechurnDez),
+            basechurnJan = sum(basechurnJan),
+            basechurnFev = sum(basechurnFev)
+            ) %>% 
+  transmute(
+            cluster,
+            '2016-11-01'= round((100*basechurnNov/baseativaNov),2),
+            '2016-12-01' = round((100*basechurnDez/baseativaDez),2),
+            '2017-01-01'= round((100*basechurnJan/baseativaJan),2),
+            '2017-02-01' = round((100*basechurnFev/baseativaFev),2)
+            ) %>% 
+  gather(mes, churn,2:5) %>% 
+  mutate(mes = as.Date(mes)) %>% 
+  filter(!(cluster %in% c("3", "4"))) %>%
+  ggplot() +
+  aes(x = mes, y = churn, colour = cluster) +
+  geom_line(size = 1L) +
+  scale_color_brewer(palette = "Paired") +
+  labs(x = "Mês", y = "Taxa de churn (%)", title = "Taxa de churn mensal por cluster") +
+  theme_minimal()
+ggplotly(clusters_churn)  
+```
+
+```{r tvm, echo=FALSE, fig.align='center', fig.height=6, fig.width=10, message=FALSE, warning=FALSE, collapse=T}
+tvm_cluster <- 
+data_clusters %>%
+  select(stonecode, cluster, Data_Apuracao, ativado) %>% 
+  spread(Data_Apuracao, ativado) %>% 
+  mutate(baseativaNov = case_when(`2016-10-01` == 'Ativo' ~ 1, T~0),
+         baseativaDez = case_when(`2016-11-01` == 'Ativo' ~ 1, T~0),
+         baseativaJan = case_when(`2016-12-01` == 'Ativo' ~ 1, T~0),
+         baseativaFev = case_when(`2017-01-01` == 'Ativo' ~ 1, T~0),
+         
+         basechurnNov = paste(`2016-10-01`,`2016-11-01`, sep = ''),
+         basechurnDez = paste(`2016-11-01`,`2016-12-01`, sep = ''),
+         basechurnJan = paste(`2016-12-01`,`2017-01-01`, sep = ''),
+         basechurnFev = paste(`2017-01-01`,`2017-02-01`, sep = '')
+  ) %>% 
+  
+  mutate(basechurnNov = case_when(basechurnNov == 'AtivoInativo' ~ 1, T ~ 0),
+         basechurnDez = case_when(basechurnDez == 'AtivoInativo' ~ 1, T ~ 0),
+         basechurnJan = case_when(basechurnJan == 'AtivoInativo' ~ 1, T ~ 0),
+         basechurnFev = case_when(basechurnFev == 'AtivoInativo' ~ 1, T ~ 0)
+  ) %>% 
+  select(-`2016-10-01`, -`2016-11-01`, -`2016-12-01`, -`2017-01-01`, -`2017-02-01`, -stonecode) %>% 
+  group_by(cluster) %>% 
+  summarise(
+    baseativaNov = sum(baseativaNov),
+    baseativaDez = sum(baseativaDez),
+    baseativaJan = sum(baseativaJan),
+    baseativaFev = sum(baseativaFev),
+    basechurnNov = sum(basechurnNov),
+    basechurnDez = sum(basechurnDez),
+    basechurnJan = sum(basechurnJan),
+    basechurnFev = sum(basechurnFev)
+  ) %>% 
+  transmute(
+    cluster,
+    '2016-11-01'= round(1/(basechurnNov/baseativaNov),2),
+    '2016-12-01'= round(1/(basechurnDez/baseativaDez),2),
+    '2017-01-01'= round(1/(basechurnJan/baseativaJan),2),
+    '2017-02-01'= round(1/(basechurnFev/baseativaFev),2)
+  ) %>% 
+  gather(mes, TVM,2:5) %>% 
+  mutate(mes = as.Date(mes)) %>% 
+  filter(!(cluster %in% c("3", "4")), TVM != Inf ) %>% 
+  group_by(cluster) %>% 
+  summarise(TVM = mean(TVM)) %>% 
+  ggplot() +
+  aes(x = cluster, fill = cluster, weight = TVM) +
+  geom_bar() +
+  scale_fill_brewer(palette = "Paired") +
+  labs(x = "Cluster", y = "Tempo de vida médio (meses)", title = "Tempo de vida médio por cluster") +
+  theme_minimal()
+ggplotly(tvm_cluster)
+```
+  
+### Lucro médio por cliente ativo
+```{r lucromedio, echo=FALSE, fig.align='center', fig.height=10, fig.width=6, message=FALSE, warning=FALSE, collapse=T}
+cluster_lucromedio <- 
+data_clusters %>%
+  select(stonecode, cluster, Data_Apuracao, ativado, Margem_final) %>%
+  mutate(ativado = case_when(ativado == 'Ativo' ~ 1, T~0)) %>% 
+  select(-stonecode) %>% 
+  filter(ativado== 1) %>% 
+  group_by(cluster, Data_Apuracao) %>% 
+  summarise(ativos = sum(ativado),
+            lucro = sum(Margem_final),
+            lucro_medio = lucro/ativos
+  ) %>% 
+  filter(!(cluster %in% c("3", "4"))) %>%
+  group_by(cluster) %>% 
+  summarise(lucro_medio = mean(lucro_medio)) %>% 
+  ggplot() +
+  aes(x = cluster, fill = cluster, weight = lucro_medio) +
+  geom_bar() +
+  scale_fill_brewer(palette = "Paired") +
+  labs(x = "Cluster", y = "Lucro Médio (R$)", title = "Lucro médio por Cliente") +
+  theme_minimal()
+ggplotly(cluster_lucromedio)
+```
+
+```{r lucromed, echo=FALSE, fig.align='center', fig.height=10, fig.width=6, message=FALSE, warning=FALSE, collapse=T}
+cluster_lucromed <- 
+data_clusters %>%
+  select(stonecode, cluster, Data_Apuracao, ativado, Margem_final) %>%
+  mutate(ativado = case_when(ativado == 'Ativo' ~ 1, T~0)) %>% 
+  select(-stonecode) %>% 
+  filter(ativado== 1) %>% 
+  group_by(cluster, Data_Apuracao) %>% 
+  summarise(ativos = sum(ativado),
+            lucro = sum(Margem_final),
+            lucro_medio = lucro/ativos
+            ) %>% 
+  filter(!(cluster %in% c("3", "4"))) %>%
+  ggplot() +
+  aes(x = Data_Apuracao, y = lucro_medio, colour = cluster) +
+  geom_line(size = 1L) +
+  scale_color_brewer(palette = "Paired") +
+  labs(x = "Mês de referência", y = "Lucro médio (R$)", title = "Lucro médio pro Cliente ativo") +
+  theme_minimal()
+ggplotly(cluster_lucromed)
+```
+### Principais atividades
+Para o cluster 1 temos que os ramos de vestuário e alimentação tem maior representatividade, cada um com aproximadamente 14%. No cluster 2 o ramo de alimentação se destaca com quase 30% de participação. Para o cluster 5 atividades relacionadas a automóveis é a que concentra mais observações.
+
+```{r atividades, echo=FALSE, fig.align='center', fig.height=12, fig.width=10, message=FALSE, warning=FALSE, collapse=T}
+clust_act <-
+  data_clusters %>%
+  select(stonecode, cluster, DescricaoGrupo) %>% 
+  distinct() %>% 
+  group_by(cluster, DescricaoGrupo) %>% 
+  summarise(quantidade = n()) %>% 
+  mutate(totalcluster = sum(quantidade)) %>% 
+  mutate(pct = 100*quantidade/totalcluster) %>% 
+  arrange(desc(pct)) %>% 
+  filter(!(cluster %in% c('4', '3'))) %>%
+  filter(pct >= 5L ) %>%
+  ggplot() +
+  aes(x = DescricaoGrupo, fill = cluster, y = pct) +
+  geom_col() +
+  coord_flip() +
+  scale_fill_brewer(palette = 'Paired') +
+  labs(x = '', y = 'Qauntidade', title = 'Atividades mais comuns por cluster', 
+       caption = 'Foram consideradas apenas atividades que representam 5% ou mais do cluster') +
+  theme_minimal() +
+  facet_wrap(vars(cluster), ncol = 1, scales = "free_y") +
+  geom_text(aes(label = round(pct,2)),angle = 90)+
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+
+ggplotly(clust_act)
+```
+
+
+```{r atividade, echo=FALSE, fig.align='center', fig.height=10, fig.width=8, message=FALSE, warning=FALSE, collapse=T}
+
+cluster_canal <-
+data_clusters %>%
+  select(stonecode, cluster, Canal) %>% 
+  distinct() %>% 
+  group_by(cluster, Canal) %>% 
+  summarise(quantidade = n()) %>% 
+  mutate(totalcluster = sum(quantidade)) %>% 
+  mutate(pct = 100*quantidade/totalcluster) %>% 
+  arrange(desc(pct)) %>% 
+  filter(!(cluster %in% c('4', '3'))) %>%
+  ggplot() +
+  aes(x = Canal, fill = cluster, y = pct) +
+  geom_col() +
+  scale_fill_brewer(palette = "Paired") +
+  coord_flip() +
+  theme_minimal() +
+  facet_wrap(vars(cluster))+
+  labs(x = '', y = 'Quantidade', title = '% de Clientes por canal em cada cluster') +
+  theme_minimal() +
+  facet_wrap(vars(cluster), ncol = 1) +
+  geom_text(aes(label = round(pct,2)),angle =0)+
+  theme(axis.title.x=element_blank(),
+        axis.text.x=element_blank(),
+        axis.ticks.x=element_blank())
+ggplotly(cluster_canal)  
+```
